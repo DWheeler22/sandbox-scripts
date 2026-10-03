@@ -1,6 +1,6 @@
 #!/bin/bash
 # Toggle Kali between "gateway mode" (eth0 WAN + eth1 analysis) and normal single-NIC mode.
-# Usage: sudo gateway on|off|status
+# Usage: sudo gateway on|off [nodocker]|status
 set -uo pipefail
 
 WAN=eth0
@@ -14,13 +14,19 @@ status() {
   echo "ip_forward : $(cat /proc/sys/net/ipv4/ip_forward)"
   echo -n "nft filter : "; nft list table inet filter >/dev/null 2>&1 && echo loaded || echo not loaded
   echo -n "nft nat    : "; nft list table ip nat >/dev/null 2>&1 && echo loaded || echo not loaded
-  echo "dnsmasq    : $(systemctl is-active dnsmasq)"
-  echo "nftables   : $(systemctl is-active nftables)"
+  echo "dnsmasq    : $(systemctl is-active dnsmasq) / $(systemctl is-enabled dnsmasq 2>&1)"
+  echo "nftables   : $(systemctl is-active nftables) / $(systemctl is-enabled nftables 2>&1)"
+  echo "docker     : $(systemctl is-active docker.service) / $(systemctl is-enabled docker.service 2>&1)"
+  echo "docker.sock: $(systemctl is-active docker.socket) / $(systemctl is-enabled docker.socket 2>&1)"
   echo; ip -br a show "$WAN" "$LAN" 2>/dev/null
 }
 
 on() {
   echo "[*] Enabling gateway mode"
+
+  # 0. Stop Docker (socket first, so it can't re-activate the service)
+  systemctl disable --now docker.socket >/dev/null 2>&1
+  systemctl disable --now docker.service >/dev/null 2>&1
 
   # 1. Firewall first, so forwarding is never enabled without rules
   nft -c -f /etc/nftables.conf || { echo "nftables.conf has errors, aborting."; exit 1; }
@@ -40,7 +46,7 @@ on() {
   echo 'net.ipv4.ip_forward=1' > "$SYSCTL"
   sysctl -q -w net.ipv4.ip_forward=1
 
-  echo "[+] Gateway mode ON"; echo; status
+  echo "[+] Gateway mode ON (Docker stopped and disabled)"; echo; status
 }
 
 off() {
@@ -61,14 +67,20 @@ off() {
   nmcli con modify "$PROFILE" connection.autoconnect no
   nmcli con down "$PROFILE" 2>/dev/null
 
+  # 5. Docker last, after the ruleset is flushed, so it can build its own rules
+  if [ "${1:-}" = "nodocker" ]; then
+    echo "[i] Leaving Docker disabled"
+  else
+    systemctl enable --now docker.socket >/dev/null 2>&1
+    systemctl enable --now docker.service >/dev/null 2>&1
+  fi
+
   echo "[+] Gateway mode OFF (Kali is back to normal, eth0 only)"; echo; status
-  echo
-  echo "Note: Docker is still disabled. Re-enable with: sudo systemctl enable --now docker"
 }
 
 case "${1:-}" in
   on) on ;;
-  off) off ;;
+  off) off "${2:-}" ;;
   status) status ;;
-  *) echo "Usage: sudo gateway on|off|status"; exit 1 ;;
+  *) echo "Usage: sudo gateway on|off [nodocker]|status"; exit 1 ;;
 esac
